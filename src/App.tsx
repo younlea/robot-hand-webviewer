@@ -27,53 +27,141 @@ type AnimationSequence = {
   poses: SequencePose[];
 };
 
+type SequenceBuilderItem = {
+  instanceId: string;
+  pose: RecordedPose;
+};
+
 const STORAGE_KEYS = {
   POSES: 'robot-hand-poses',
   SEQUENCES: 'robot-hand-sequences'
 } as const;
 
+
+
 const defaultPoses: RecordedPose[] = [
+
   {
+
     id: 'default-open',
+
     name: '기본 열린 손',
+
     timestamp: Date.now(),
+
     joints: {
-      'thumb_joint': 0,
-      'index_finger_joint': 0,
-      'middle_finger_joint': 0,
-      'ring_finger_joint': 0,
-      'pinky_joint': 0,
+
+      'thumb_abduction_joint': -0.5,
+
+      'thumb_base_joint': -0.3,
+
+      'thumb_mid_joint': 0.0,
+
+      'thumb_tip_joint': -0.3,
+
+      'index_base_joint': 0.0,
+
+      'index_mid_joint': 0.0,
+
+      'index_tip_joint': 0.0,
+
+      'middle_base_joint': 0.0,
+
+      'middle_mid_joint': 0.0,
+
+      'middle_tip_joint': 0.0,
+
+      'ring_base_joint': 0.0,
+
+      'ring_mid_joint': 0.0,
+
+      'ring_tip_joint': 0.0,
+
+      'pinky_base_joint': 0.0,
+
+      'pinky_mid_joint': 0.0,
+
+      'pinky_tip_joint': 0.0,
+
     }
+
   },
+
   {
+
     id: 'default-closed',
+
     name: '기본 닫힌 손',
+
     timestamp: Date.now(),
+
     joints: {
-      'thumb_joint': 1.0,
-      'index_finger_joint': 1.0,
-      'middle_finger_joint': 1.0,
-      'ring_finger_joint': 1.0,
-      'pinky_joint': 1.0,
+
+      'thumb_abduction_joint': 0,
+
+      'thumb_base_joint': 1.0,
+
+      'thumb_mid_joint': 1.5,
+
+      'thumb_tip_joint': 0.3,
+
+      'index_base_joint': 1.6,
+
+      'index_mid_joint': 1.6,
+
+      'index_tip_joint': 1.6,
+
+      'middle_base_joint': 1.6,
+
+      'middle_mid_joint': 1.6,
+
+      'middle_tip_joint': 1.6,
+
+      'ring_base_joint': 1.6,
+
+      'ring_mid_joint': 1.6,
+
+      'ring_tip_joint': 1.6,
+
+      'pinky_base_joint': 1.6,
+
+      'pinky_mid_joint': 1.6,
+
+      'pinky_tip_joint': 1.6,
+
     }
+
   }
+
 ];
 
 
+
+
+
 interface PoseItemProps {
+
   pose: RecordedPose;
+
   index: number;
+
+  source: string;
+
   movePose: (dragIndex: number, hoverIndex: number) => void;
+
   onDelete: (id: string) => void;
+
   applyPose: (joints: JointPose) => void;
+
   onEdit: (pose: RecordedPose) => void;
+
 }
 
 const ItemTypes = {
   POSE: 'pose',
 };
 
-const PoseItem: React.FC<PoseItemProps> = ({ pose, index, movePose, onDelete, applyPose, onEdit }) => {
+const PoseItem: React.FC<PoseItemProps> = ({ pose, index, source, movePose, onDelete, applyPose, onEdit }) => {
   const ref = useRef<HTMLDivElement>(null);
   const [{ handlerId }, drop] = useDrop({
     accept: ItemTypes.POSE,
@@ -84,6 +172,9 @@ const PoseItem: React.FC<PoseItemProps> = ({ pose, index, movePose, onDelete, ap
     },
     hover(item: any, monitor) {
       if (!ref.current) {
+        return;
+      }
+      if (item.source !== source) {
         return;
       }
       const dragIndex = item.index;
@@ -114,7 +205,7 @@ const PoseItem: React.FC<PoseItemProps> = ({ pose, index, movePose, onDelete, ap
 
   const [{ isDragging }, drag] = useDrag({
     type: ItemTypes.POSE,
-    item: () => ({ id: pose.id, index }),
+    item: () => ({ id: pose.id, index, source }),
     collect: (monitor) => ({
       isDragging: monitor.isDragging(),
     }),
@@ -149,7 +240,7 @@ const PoseItem: React.FC<PoseItemProps> = ({ pose, index, movePose, onDelete, ap
   );
 };
 
-const App: React.FC = () => {
+const AppContent: React.FC = () => {
   const mountRef = useRef<HTMLDivElement>(null);
   const [renderer] = useState(() => new THREE.WebGLRenderer({ antialias: true }));
   const [scene] = useState(() => new THREE.Scene());
@@ -244,6 +335,7 @@ const App: React.FC = () => {
   const [poseName, setPoseName] = useState('');
   const [currentSequence, setCurrentSequence] = useState<AnimationSequence | null>(null);
   const [sequenceName, setSequenceName] = useState('');
+  const [sequenceBuilderPoses, setSequenceBuilderPoses] = useState<SequenceBuilderItem[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const animationRef = useRef<number | null>(null);
 
@@ -268,11 +360,14 @@ const App: React.FC = () => {
       const jointList = Object.keys(urdf.joints)
         .map(jointName => {
           const joint = urdf.joints[jointName];
+          // Initialize the joint value to its lower limit, which is the default state.
+          const initialValue = joint.limit.lower;
+          urdf.setJointValue(jointName, initialValue);
           return {
             name: jointName,
             min: joint.limit.lower,
             max: joint.limit.upper,
-            value: 0,
+            value: initialValue,
           };
         });
       setJoints(jointList);
@@ -304,16 +399,20 @@ const App: React.FC = () => {
 
   const applyPose = useCallback((pose: JointPose) => {
     if (!robot) return;
-    
-    Object.entries(pose).forEach(([name, value]) => {
-      (robot as any).setJointValue(name, value);
+
+    const poseMap = new Map(Object.entries(pose));
+
+    const newJointsState = joints.map(joint => {
+      if (poseMap.has(joint.name)) {
+        const newValue = poseMap.get(joint.name)!;
+        (robot as any).setJointValue(joint.name, newValue);
+        return { ...joint, value: newValue };
+      }
+      return joint;
     });
-    
-    setJoints(prev => prev.map(j => ({
-      ...j,
-      value: pose[j.name] !== undefined ? pose[j.name] : j.value
-    })));
-  }, [robot]);
+
+    setJoints(newJointsState);
+  }, [robot, joints]);
 
   const onChangeJoint = useCallback((name: string, value: number) => {
     if (!robot) return;
@@ -363,7 +462,8 @@ const App: React.FC = () => {
       ...prev,
       [jointName]: value
     }));
-  }, []);
+    onChangeJoint(jointName, value);
+  }, [onChangeJoint]);
 
   const savePoses = useCallback((poses: RecordedPose[]) => {
     setRecordedPoses(poses);
@@ -485,82 +585,131 @@ const App: React.FC = () => {
     });
   }, [savePoses]);
 
+  const moveSequenceBuilderPose = useCallback((dragIndex: number, hoverIndex: number) => {
+    setSequenceBuilderPoses((prevPoses) => {
+      const newPoses = [...prevPoses];
+      const [removed] = newPoses.splice(dragIndex, 1);
+      newPoses.splice(hoverIndex, 0, removed);
+      return newPoses;
+    });
+  }, []);
+
+  const [{ isOver, canDrop }, dropRef] = useDrop(() => ({
+    accept: ItemTypes.POSE,
+    drop: (item: { id: string, index: number }) => {
+      const droppedPose = recordedPoses.find(p => p.id === item.id);
+      if (droppedPose) {
+        const newInstance: SequenceBuilderItem = {
+          instanceId: `instance-${Date.now()}-${Math.random()}`,
+          pose: droppedPose,
+        };
+        setSequenceBuilderPoses(current => [...current, newInstance]);
+      }
+    },
+    collect: (monitor) => ({
+      isOver: monitor.isOver(),
+      canDrop: monitor.canDrop(),
+    }),
+  }), [recordedPoses]);
+
   const stopPlayback = useCallback(() => {
     if (animationRef.current) {
-      clearTimeout(animationRef.current);
+      cancelAnimationFrame(animationRef.current);
       animationRef.current = null;
     }
     setIsPlaying(false);
     setCurrentSequence(null);
   }, []);
 
-  const playRecording = useCallback(() => {
-    if (isPlaying || recordedPoses.length < 1) return;
-    
-    setIsPlaying(true);
-    let currentIndex = 0;
+  const playSequence = useCallback((sequence: AnimationSequence) => {
+    if (isPlaying) {
+      stopPlayback();
+      return;
+    }
 
-    const playNext = () => {
-      if (currentIndex >= recordedPoses.length) {
+    if (sequence.poses.length < 2) {
+      console.warn("Sequence needs at least two poses to play.");
+      return;
+    }
+
+    setIsPlaying(true);
+    setCurrentSequence(sequence);
+
+    let currentPoseIndex = 0;
+    let startTime = 0;
+    let fromJoints: JointPose | null = null;
+
+    const animate = (time: number) => {
+      if (startTime === 0) {
+        startTime = time;
+        const firstPoseData = recordedPoses.find(p => p.id === sequence.poses[0].poseId);
+        if (firstPoseData) {
+          applyPose(firstPoseData.joints);
+          fromJoints = firstPoseData.joints;
+        }
+      }
+
+      const seqPose = sequence.poses[currentPoseIndex];
+      const nextSeqPose = sequence.poses[currentPoseIndex + 1];
+
+      if (!nextSeqPose) {
         stopPlayback();
         return;
       }
+
+      const startPoseData = fromJoints ? { joints: fromJoints } : recordedPoses.find(p => p.id === seqPose.poseId);
+      const endPoseData = recordedPoses.find(p => p.id === nextSeqPose.poseId);
       
-      applyPose(recordedPoses[currentIndex].joints);
-      currentIndex++;
-      
-      animationRef.current = setTimeout(playNext, 1000 / playbackSpeed);
+      if (!startPoseData || !endPoseData) {
+        console.error("Could not find poses for sequence animation.");
+        stopPlayback();
+        return;
+      }
+
+      const duration = seqPose.duration / playbackSpeed;
+      const elapsedTime = time - startTime;
+      const alpha = Math.min(elapsedTime / duration, 1.0);
+
+      const interpolatedJoints: JointPose = {};
+      for (const jointName in endPoseData.joints) {
+        const startValue = startPoseData.joints[jointName] ?? 0;
+        const endValue = endPoseData.joints[jointName] ?? 0;
+        interpolatedJoints[jointName] = THREE.MathUtils.lerp(startValue, endValue, alpha);
+      }
+      applyPose(interpolatedJoints);
+
+      if (alpha >= 1.0) {
+        currentPoseIndex++;
+        startTime = time;
+        fromJoints = endPoseData.joints;
+        if (currentPoseIndex >= sequence.poses.length - 1) {
+          applyPose(endPoseData.joints);
+          stopPlayback();
+          return;
+        }
+      }
+
+      animationRef.current = requestAnimationFrame(animate);
     };
 
-    playNext();
-  }, [isPlaying, recordedPoses, applyPose, stopPlayback, playbackSpeed]);
+    animationRef.current = requestAnimationFrame(animate);
+  }, [isPlaying, stopPlayback, recordedPoses, applyPose, playbackSpeed]);
 
   const createSequence = useCallback(() => {
-    if (!sequenceName.trim() || recordedPoses.length < 1) return;
+    if (!sequenceName.trim() || sequenceBuilderPoses.length < 2) return;
 
     const newSequence: AnimationSequence = {
       id: `seq-${Date.now()}`,
       name: sequenceName.trim(),
-      poses: recordedPoses.map(p => ({ poseId: p.id, duration: 1000 })),
+      poses: sequenceBuilderPoses.map(item => ({ poseId: item.pose.id, duration: 1000 })),
     };
 
     const newSequences = [...sequences, newSequence];
     setSequences(newSequences);
     saveToLocalStorage(STORAGE_KEYS.SEQUENCES, newSequences);
     setSequenceName('');
-  }, [sequenceName, recordedPoses, sequences, saveToLocalStorage]);
-
-  const playSequence = useCallback((sequence: AnimationSequence) => {
-    if (isPlaying) {
-      stopPlayback();
-      return;
-    }
-    
-    if (sequence.poses.length === 0) return;
-
-    setIsPlaying(true);
-    setCurrentSequence(sequence);
-    let currentPoseInSequence = 0;
-
-    const playNext = () => {
-      if (currentPoseInSequence >= sequence.poses.length) {
-        stopPlayback();
-        return;
-      }
-
-      const seqPose = sequence.poses[currentPoseInSequence];
-      const fullPose = recordedPoses.find(p => p.id === seqPose.poseId);
-
-      if (fullPose) {
-        applyPose(fullPose.joints);
-      }
-
-      currentPoseInSequence++;
-      animationRef.current = setTimeout(playNext, seqPose.duration / playbackSpeed);
-    };
-
-    playNext();
-  }, [isPlaying, stopPlayback, recordedPoses, applyPose, playbackSpeed]);
+    setSequenceBuilderPoses([]); // Clear the builder
+  }, [sequenceName, sequenceBuilderPoses, sequences, saveToLocalStorage]);
 
   const deleteSequence = useCallback((id: string) => {
     const newSequences = sequences.filter(seq => seq.id !== id);
@@ -582,396 +731,409 @@ const App: React.FC = () => {
   }, [sequences, saveToLocalStorage]);
 
   return (
-    <DndProvider backend={HTML5Backend}>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 400px', height: '100vh' }}>
-        <div ref={mountRef} style={{ width: '100%', height: '100%' }} />
-        <div style={{ padding: 12, overflow: 'auto', borderLeft: '1px solid #e5e7eb' }}>
-          <h3 style={{ marginTop: 0 }}>URDF 뷰어</h3>
-          <input type="file" accept=".urdf, text/xml, application/xml" onChange={onLoadUrdfFile} />
-          
-          <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
-            <h4 style={{ marginTop: 0, marginBottom: '12px' }}>레코딩 컨트롤</h4>
-            <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-              <button 
-                onClick={() => setIsRecording(!isRecording)}
-                style={{
-                  flex: 1,
-                  padding: '8px',
-                  backgroundColor: isRecording ? '#ef4444' : '#10b981',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                {isRecording ? '레코딩 중지' : '레코딩 시작'}
-              </button>
-              <button 
-                onClick={addPose}
-                disabled={!isRecording}
-                style={{
-                  flex: 1,
-                  padding: '8px',
-                  backgroundColor: isRecording ? '#3b82f6' : '#d1d5db',
-                  color: isRecording ? 'white' : '#6b7280',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: isRecording ? 'pointer' : 'not-allowed',
-                  opacity: isRecording ? 1 : 0.7
-                }}
-              >
-                포즈 추가
-              </button>
-            </div>
-            <input
-              type="text"
-              value={poseName}
-              onChange={(e) => setPoseName(e.target.value)}
-              placeholder="포즈 이름 (선택사항)"
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 400px', height: '100vh' }}>
+      <div ref={mountRef} style={{ width: '100%', height: '100%' }} />
+      <div style={{ padding: 12, overflow: 'auto', borderLeft: '1px solid #e5e7eb' }}>
+        <h3 style={{ marginTop: 0 }}>URDF 뷰어</h3>
+        <input type="file" accept=".urdf, text/xml, application/xml" onChange={onLoadUrdfFile} />
+        
+        <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
+          <h4 style={{ marginTop: 0, marginBottom: '12px' }}>레코딩 컨트롤</h4>
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+            <button 
+              onClick={() => setIsRecording(!isRecording)}
               style={{
-                width: '100%',
+                flex: 1,
                 padding: '8px',
-                marginBottom: '8px',
-                border: '1px solid #d1d5db',
-                borderRadius: '4px'
+                backgroundColor: isRecording ? '#ef4444' : '#10b981',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer'
               }}
+            >
+              {isRecording ? '레코딩 중지' : '레코딩 시작'}
+            </button>
+            <button 
+              onClick={addPose}
               disabled={!isRecording}
-            />
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button 
-                onClick={isPlaying ? stopPlayback : playRecording}
-                disabled={recordedPoses.length < 2}
-                style={{
-                  flex: 1,
-                  padding: '8px',
-                  backgroundColor: recordedPoses.length >= 2 ? (isPlaying ? '#ef4444' : '#10b981') : '#d1d5db',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: recordedPoses.length >= 2 ? 'pointer' : 'not-allowed',
-                  opacity: recordedPoses.length >= 2 ? 1 : 0.7
-                }}
-              >
-                {isPlaying ? '재생 중지' : '재생'}
-              </button>
-              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '12px' }}>속도:</span>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="3"
-                  step="0.1"
-                  value={playbackSpeed}
-                  onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}
-                  style={{ flex: 1 }}
-                />
-                <span style={{ fontSize: '12px', minWidth: '30px' }}>{playbackSpeed.toFixed(1)}x</span>
-              </div>
-            </div>
-            <div style={{ marginTop: '10px' }}>
-              <button onClick={exportPoses} disabled={!recordedPoses.length}>포즈 내보내기</button>
-              <label style={{ marginLeft: '10px', display: 'inline-block' }}>
-                <button onClick={() => fileInputRef.current?.click()}>포즈 가져오기</button>
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={importPoses}
-                  accept=".json"
-                  style={{ display: 'none' }}
-                />
-              </label>
+              style={{
+                flex: 1,
+                padding: '8px',
+                backgroundColor: isRecording ? '#3b82f6' : '#d1d5db',
+                color: isRecording ? 'white' : '#6b7280',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: isRecording ? 'pointer' : 'not-allowed',
+                opacity: isRecording ? 1 : 0.7
+              }}
+            >
+              포즈 추가
+            </button>
+          </div>
+          <input
+            type="text"
+            value={poseName}
+            onChange={(e) => setPoseName(e.target.value)}
+            placeholder="포즈 이름 (선택사항)"
+            style={{
+              width: '100%',
+              padding: '8px',
+              marginBottom: '8px',
+              border: '1px solid #d1d5db',
+              borderRadius: '4px'
+            }}
+            disabled={!isRecording}
+          />
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '12px' }}>속도:</span>
+              <input
+                type="range"
+                min="0.1"
+                max="3"
+                step="0.1"
+                value={playbackSpeed}
+                onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}
+                style={{ flex: 1 }}
+              />
+              <span style={{ fontSize: '12px', minWidth: '30px' }}>{playbackSpeed.toFixed(1)}x</span>
             </div>
           </div>
-          
-          {editingPose ? (
-            <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
-              <h4 style={{ marginTop: 0, marginBottom: '12px' }}>포즈 편집</h4>
-              <div style={{ marginBottom: '12px' }}>
-                <input
-                  type="text"
-                  value={editedPoseName}
-                  onChange={(e) => setEditedPoseName(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '8px',
-                    marginBottom: '12px',
-                    border: '1px solid #d1d5db',
-                    borderRadius: '4px'
-                  }}
-                  placeholder="포즈 이름"
-                />
-                {joints.length > 0 && (
-                  <div>
-                    {joints.map(joint => (
-                      <div key={joint.name} style={{ marginBottom: '12px' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                          <span style={{ fontSize: '0.9rem' }}>{joint.name}</span>
-                          <span style={{ fontSize: '0.8rem', color: '#6b7280' }}>
-                            {editedJoints[joint.name]?.toFixed(2) || '0.00'}
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min={joint.min}
-                          max={joint.max}
-                          step={Math.abs(joint.max - joint.min) / 100 || 0.01}
-                          value={editedJoints[joint.name] || 0}
-                          onChange={(e) => updateEditedJoint(joint.name, parseFloat(e.target.value))}
-                          style={{ width: '100%' }}
-                        />
+          <div style={{ marginTop: '10px' }}>
+            <button onClick={exportPoses} disabled={!recordedPoses.length}>포즈 내보내기</button>
+            <label style={{ marginLeft: '10px', display: 'inline-block' }}>
+              <button onClick={() => fileInputRef.current?.click()}>포즈 가져오기</button>
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={importPoses}
+                accept=".json"
+                style={{ display: 'none' }}
+              />
+            </label>
+          </div>
+        </div>
+        
+        {editingPose ? (
+          <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
+            <h4 style={{ marginTop: 0, marginBottom: '12px' }}>포즈 편집</h4>
+            <div style={{ marginBottom: '12px' }}>
+              <input
+                type="text"
+                value={editedPoseName}
+                onChange={(e) => setEditedPoseName(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '8px',
+                  marginBottom: '12px',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '4px'
+                }}
+                placeholder="포즈 이름"
+              />
+              {joints.length > 0 && (
+                <div>
+                  {joints.map(joint => (
+                    <div key={joint.name} style={{ marginBottom: '12px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                        <span style={{ fontSize: '0.9rem' }}>{joint.name}</span>
+                        <span style={{ fontSize: '0.8rem', color: '#6b7280' }}>
+                          {editedJoints[joint.name]?.toFixed(2) || '0.00'}
+                        </span>
                       </div>
-                    ))}
-                  </div>
-                )}
-                <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
-                  <button
-                    onClick={saveEditedPose}
+                      <input
+                        type="range"
+                        min={joint.min}
+                        max={joint.max}
+                        step={Math.abs(joint.max - joint.min) / 100 || 0.01}
+                        value={editedJoints[joint.name] || 0}
+                        onChange={(e) => updateEditedJoint(joint.name, parseFloat(e.target.value))}
+                        style={{ width: '100%' }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
+                <button
+                  onClick={saveEditedPose}
+                  style={{
+                    flex: 1,
+                    padding: '8px',
+                    backgroundColor: '#10b981',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: 'pointer'
+                  }}
+                >
+                  저장
+                </button>
+                <button
+                    onClick={cancelEditing}
                     style={{
                       flex: 1,
                       padding: '8px',
-                      backgroundColor: '#10b981',
+                      backgroundColor: '#ef4444',
                       color: 'white',
                       border: 'none',
                       borderRadius: '4px',
                       cursor: 'pointer'
                     }}
                   >
-                    저장
+                    취소
                   </button>
-                  <button
-                      onClick={cancelEditing}
-                      style={{
-                        flex: 1,
-                        padding: '8px',
-                        backgroundColor: '#ef4444',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer'
-                      }}
-                    >
-                      취소
-                    </button>
-                </div>
               </div>
             </div>
-          ) : (
-            <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
-              <h4 style={{ marginTop: 0, marginBottom: '12px' }}>저장된 포즈 목록</h4>
-              <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
-                {recordedPoses.map((p, i) => (
-                  <PoseItem
-                    key={p.id}
-                    pose={p}
-                    index={i}
-                    onDelete={(id) => {
-                      const newPoses = recordedPoses.filter(pose => pose.id !== id);
-                      setRecordedPoses(newPoses);
-                      saveToLocalStorage(STORAGE_KEYS.POSES, newPoses);
-                    }}
-                    movePose={movePose}
-                    applyPose={applyPose}
-                    onEdit={startEditingPose}
-                  />
-                ))}
-              </div>
-              <button 
-                onClick={() => {
-                  if (window.confirm('모든 포즈를 삭제하시겠습니까?')) {
-                    setRecordedPoses([]);
-                    saveToLocalStorage(STORAGE_KEYS.POSES, []);
-                  }
-                }}
-                disabled={recordedPoses.length === 0}
-                style={{
-                  width: '100%',
-                  marginTop: '10px',
-                  padding: '6px',
-                  backgroundColor: recordedPoses.length > 0 ? '#ef4444' : '#d1d5db',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: recordedPoses.length > 0 ? 'pointer' : 'not-allowed',
-                  opacity: recordedPoses.length > 0 ? 1 : 0.7,
-                  fontSize: '12px'
-                }}
-              >
-                모든 포즈 삭제
-              </button>
-            </div>
-          )}
-          
-          {/* 시퀀스 관리 섹션 */}
+          </div>
+        ) : (
           <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
-            <h4 style={{ marginTop: 0, marginBottom: '12px' }}>시퀀스 관리</h4>
-            
-            <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-              <input
-                type="text"
-                value={sequenceName}
-                onChange={(e) => setSequenceName(e.target.value)}
-                placeholder="시퀀스 이름"
-                style={{
-                  flex: 1,
-                  padding: '8px',
-                  border: '1px solid #d1d5db',
-                  borderRadius: '4px'
-                }}
-              />
-              <button 
-                onClick={createSequence}
-                disabled={recordedPoses.length < 2 || !sequenceName.trim()}
-                style={{
-                  padding: '8px 16px',
-                  backgroundColor: (recordedPoses.length >= 2 && sequenceName.trim()) ? '#3b82f6' : '#d1d5db',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: (recordedPoses.length >= 2 && sequenceName.trim()) ? 'pointer' : 'not-allowed'
-                }}
-              >
-                시퀀스 생성
-              </button>
+            <h4 style={{ marginTop: 0, marginBottom: '12px' }}>저장된 포즈 목록</h4>
+            <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+              {recordedPoses.map((p, i) => (
+                <PoseItem
+                  key={p.id}
+                  pose={p}
+                  index={i}
+                  source="main"
+                  onDelete={(id) => {
+                    const newPoses = recordedPoses.filter(pose => pose.id !== id);
+                    setRecordedPoses(newPoses);
+                    saveToLocalStorage(STORAGE_KEYS.POSES, newPoses);
+                  }}
+                  movePose={movePose}
+                  applyPose={applyPose}
+                  onEdit={startEditingPose}
+                />
+              ))}
             </div>
+            <button 
+              onClick={() => {
+                if (window.confirm('모든 포즈를 삭제하시겠습니까?')) {
+                  setRecordedPoses([]);
+                  saveToLocalStorage(STORAGE_KEYS.POSES, []);
+                }
+              }}
+              disabled={recordedPoses.length === 0}
+              style={{
+                width: '100%',
+                marginTop: '10px',
+                padding: '6px',
+                backgroundColor: recordedPoses.length > 0 ? '#ef4444' : '#d1d5db',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: recordedPoses.length > 0 ? 'pointer' : 'not-allowed',
+                opacity: recordedPoses.length > 0 ? 1 : 0.7,
+                fontSize: '12px'
+              }}
+            >
+              모든 포즈 삭제
+            </button>
+          </div>
+        )}
+        
+        {/* 시퀀스 관리 섹션 */}
+        <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
+          <h4 style={{ marginTop: 0, marginBottom: '12px' }}>시퀀스 생성기</h4>
 
-            {sequences.length > 0 && (
-              <div style={{ marginTop: '12px' }}>
-                <h5 style={{ margin: '0 0 8px 0' }}>저장된 시퀀스</h5>
-                <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
-                  {sequences.map(seq => (
-                    <div key={seq.id} style={{ marginBottom: '16px', border: '1px solid #e5e7eb', borderRadius: '4px', overflow: 'hidden' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', padding: '8px', backgroundColor: '#f9fafb' }}>
-                        <span style={{ flex: 1, fontWeight: 'bold' }}>{seq.name}</span>
-                        <span style={{ marginRight: '12px', color: '#6b7280' }}>{seq.poses.length} 포즈</span>
-                        <button 
-                          onClick={() => playSequence(seq)}
-                          disabled={isPlaying && currentSequence?.id === seq.id}
-                          style={{
-                            padding: '6px 12px',
-                            backgroundColor: isPlaying && currentSequence?.id === seq.id ? '#9ca3af' : '#10b981',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '4px',
-                            cursor: 'pointer',
-                            marginRight: '8px',
-                            minWidth: '60px'
-                          }}
-                        >
-                          {isPlaying && currentSequence?.id === seq.id ? '정지' : '재생'}
-                        </button>
-                        <button 
-                          onClick={() => deleteSequence(seq.id)}
-                          disabled={isPlaying}
-                          style={{
-                            padding: '6px 12px',
-                            backgroundColor: isPlaying ? '#9ca3af' : '#ef4444',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '4px',
-                            cursor: isPlaying ? 'not-allowed' : 'pointer',
-                            minWidth: '60px'
-                          }}
-                        >
-                          삭제
-                        </button>
-                      </div>
-                      <div style={{ padding: '8px', backgroundColor: 'white' }}>
-                        {seq.poses.map((pose, idx) => {
-                          const poseData = recordedPoses.find(p => p.id === pose.poseId);
-                          return (
-                            <div key={`${seq.id}-${idx}`} style={{ 
-                              display: 'flex', 
-                              alignItems: 'center', 
-                              marginBottom: '8px',
-                              padding: '8px',
-                              backgroundColor: idx % 2 === 0 ? '#f9fafb' : 'white',
-                              borderRadius: '4px',
-                              transition: 'background-color 0.2s'
-                            }}>
-                              <span style={{ flex: 1, fontSize: '0.9rem' }}>
-                                {idx + 1}. {poseData ? poseData.name : `알 수 없는 포즈 (${pose.poseId})`}
-                              </span>
-                              <div style={{ display: 'flex', alignItems: 'center', marginRight: '12px' }}>
-                                <span style={{ marginRight: '8px', fontSize: '0.8rem', color: '#4b5563' }}>지속시간 (ms):</span>
-                                <input
-                                  type="number"
-                                  min="100"
-                                  step="100"
-                                  value={pose.duration}
-                                  onChange={(e) => updatePoseDuration(seq.id, idx, parseInt(e.target.value) || 1000)}
-                                  disabled={isPlaying}
-                                  style={{
-                                    width: '80px',
-                                    padding: '4px 8px',
-                                    border: '1px solid #d1d5db',
-                                    borderRadius: '4px',
-                                    marginRight: '8px',
-                                    backgroundColor: isPlaying ? '#f3f4f6' : 'white',
-                                    color: isPlaying ? '#9ca3af' : '#1f2937'
-                                  }}
-                                />
-                              </div>
-                              <button 
-                                onClick={() => {
-                                  const poseToApply = recordedPoses.find(p => p.id === pose.poseId);
-                                  if (poseToApply) {
-                                    applyPose(poseToApply.joints);
-                                  }
-                                }}
-                                disabled={isPlaying}
-                                style={{
-                                  padding: '4px 8px',
-                                  backgroundColor: isPlaying ? '#9ca3af' : '#3b82f6',
-                                  color: 'white',
-                                  border: 'none',
-                                  borderRadius: '4px',
-                                  cursor: isPlaying ? 'not-allowed' : 'pointer',
-                                  marginRight: '4px',
-                                  fontSize: '0.8rem',
-                                  minWidth: '60px'
-                                }}
-                              >
-                                보기
-                              </button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+          <div ref={dropRef} style={{ marginBottom: '12px', padding: '12px', border: `2px dashed ${isOver ? (canDrop ? 'green' : 'red') : '#9ca3af'}`, borderRadius: '4px', backgroundColor: isOver && canDrop ? '#e6ffed' : '#f9fafb', transition: 'background-color 0.2s, border-color 0.2s' }}>
+            <p style={{ marginTop: 0, color: '#6b7280', textAlign: 'center', fontSize: '14px' }}>
+              위의 '저장된 포즈 목록'에서 포즈를 여기로 드래그하여 시퀀스를 만드세요.
+            </p>
+            <div style={{ minHeight: '60px', maxHeight: '250px', overflowY: 'auto' }}>
+              {sequenceBuilderPoses.map((item, i) => (
+                <PoseItem
+                  key={item.instanceId}
+                  pose={item.pose}
+                  index={i}
+                  source="builder"
+                  onDelete={() => {
+                    setSequenceBuilderPoses(prev => prev.filter(p => p.instanceId !== item.instanceId));
+                  }}
+                  movePose={moveSequenceBuilderPose}
+                  applyPose={applyPose}
+                  onEdit={startEditingPose}
+                />
+              ))}
+            </div>
+          </div>
+          
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+            <input
+              type="text"
+              value={sequenceName}
+              onChange={(e) => setSequenceName(e.target.value)}
+              placeholder="시퀀스 이름"
+              style={{
+                flex: 1,
+                padding: '8px',
+                border: '1px solid #d1d5db',
+                borderRadius: '4px'
+              }}
+            />
+            <button 
+              onClick={createSequence}
+              disabled={sequenceBuilderPoses.length < 2 || !sequenceName.trim()}
+              style={{
+                padding: '8px 16px',
+                backgroundColor: (sequenceBuilderPoses.length >= 2 && sequenceName.trim()) ? '#3b82f6' : '#d1d5db',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: (sequenceBuilderPoses.length >= 2 && sequenceName.trim()) ? 'pointer' : 'not-allowed'
+              }}
+            >
+              시퀀스 생성
+            </button>
           </div>
 
-          {/* 조인트 제어 섹션 */}
-          <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
-            <h4 style={{ marginTop: 0, marginBottom: '12px' }}>조인트 제어</h4>
-            {joints.length === 0 ? (
-              <div style={{ color: '#666' }}>로드된 조인트가 없습니다. URDF 파일을 로드해주세요.</div>
-            ) : (
-              <div>
-                {joints.map(j => (
-                  <div key={j.name} style={{ marginBottom: 12 }}>
-                    <div style={{ fontSize: 12, marginBottom: 4 }}>
-                      {j.name} ({deg(j.min).toFixed(0)}° ~ {deg(j.max).toFixed(0)}°)
+          {sequences.length > 0 && (
+            <div style={{ marginTop: '12px' }}>
+              <h5 style={{ margin: '0 0 8px 0' }}>저장된 시퀀스</h5>
+              <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
+                {sequences.map(seq => (
+                  <div key={seq.id} style={{ marginBottom: '16px', border: '1px solid #e5e7eb', borderRadius: '4px', overflow: 'hidden' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', padding: '8px', backgroundColor: '#f9fafb' }}>
+                      <span style={{ flex: 1, fontWeight: 'bold' }}>{seq.name}</span>
+                      <span style={{ marginRight: '12px', color: '#6b7280' }}>{seq.poses.length} 포즈</span>
+                      <button 
+                        onClick={() => playSequence(seq)}
+                        disabled={isPlaying && currentSequence?.id !== seq.id}
+                        style={{
+                          padding: '6px 12px',
+                          backgroundColor: isPlaying && currentSequence?.id === seq.id ? '#ef4444' : '#10b981',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          marginRight: '8px',
+                          minWidth: '60px'
+                        }}
+                      >
+                        {isPlaying && currentSequence?.id === seq.id ? '정지' : '재생'}
+                      </button>
+                      <button 
+                        onClick={() => deleteSequence(seq.id)}
+                        disabled={isPlaying}
+                        style={{
+                          padding: '6px 12px',
+                          backgroundColor: isPlaying ? '#9ca3af' : '#ef4444',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: isPlaying ? 'not-allowed' : 'pointer',
+                          minWidth: '60px'
+                        }}
+                      >
+                        삭제
+                      </button>
                     </div>
-                    <input
-                      type="range"
-                      min={j.min}
-                      max={j.max}
-                      step={Math.abs(j.max - j.min) / 100 || 0.01}
-                      value={j.value}
-                      onChange={e => onChangeJoint(j.name, parseFloat(e.target.value))}
-                      style={{ width: '100%' }}
-                    />
+                    <div style={{ padding: '8px', backgroundColor: 'white' }}>
+                      {seq.poses.map((pose, idx) => {
+                        const poseData = recordedPoses.find(p => p.id === pose.poseId);
+                        return (
+                          <div key={`${seq.id}-${idx}`} style={{ 
+                            display: 'flex', 
+                            alignItems: 'center', 
+                            marginBottom: '8px',
+                            padding: '8px',
+                            backgroundColor: idx % 2 === 0 ? '#f9fafb' : 'white',
+                            borderRadius: '4px',
+                            transition: 'background-color 0.2s'
+                          }}>
+                            <span style={{ flex: 1, fontSize: '0.9rem' }}>
+                              {idx + 1}. {poseData ? poseData.name : `알 수 없는 포즈 (${pose.poseId})`}
+                            </span>
+                            <div style={{ display: 'flex', alignItems: 'center', marginRight: '12px' }}>
+                              <span style={{ marginRight: '8px', fontSize: '0.8rem', color: '#4b5563' }}>지속시간 (ms):</span>
+                              <input
+                                type="number"
+                                min="100"
+                                step="100"
+                                value={pose.duration}
+                                onChange={(e) => updatePoseDuration(seq.id, idx, parseInt(e.target.value) || 1000)}
+                                disabled={isPlaying}
+                                style={{
+                                  width: '80px',
+                                  padding: '4px 8px',
+                                  border: '1px solid #d1d5db',
+                                  borderRadius: '4px',
+                                  marginRight: '8px',
+                                  backgroundColor: isPlaying ? '#f3f4f6' : 'white',
+                                  color: isPlaying ? '#9ca3af' : '#1f2937'
+                                }}
+                              />
+                            </div>
+                            <button 
+                              onClick={() => {
+                                const poseToApply = recordedPoses.find(p => p.id === pose.poseId);
+                                if (poseToApply) {
+                                  applyPose(poseToApply.joints);
+                                }
+                              }}
+                              disabled={isPlaying}
+                              style={{
+                                padding: '4px 8px',
+                                backgroundColor: isPlaying ? '#9ca3af' : '#3b82f6',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '4px',
+                                cursor: isPlaying ? 'not-allowed' : 'pointer',
+                                marginRight: '4px',
+                                fontSize: '0.8rem',
+                                minWidth: '60px'
+                              }}
+                            >
+                              보기
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 ))}
               </div>
-            )}
-          </div>
+            </div>
+          )}
+        </div>
+
+        {/* 조인트 제어 섹션 */}
+        <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
+          <h4 style={{ marginTop: 0, marginBottom: '12px' }}>조인트 제어</h4>
+          {joints.length === 0 ? (
+            <div style={{ color: '#666' }}>로드된 조인트가 없습니다. URDF 파일을 로드해주세요.</div>
+          ) : (
+            <div>
+              {joints.map(j => (
+                <div key={j.name} style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 12, marginBottom: 4 }}>
+                    {j.name} ({deg(j.min).toFixed(0)}° ~ {deg(j.max).toFixed(0)}°)
+                  </div>
+                  <input
+                    type="range"
+                    min={j.min}
+                    max={j.max}
+                    step={Math.abs(j.max - j.min) / 100 || 0.01}
+                    value={j.value}
+                    onChange={e => onChangeJoint(j.name, parseFloat(e.target.value))}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
+    </div>
+  );
+};
+
+const App: React.FC = () => {
+  return (
+    <DndProvider backend={HTML5Backend}>
+      <AppContent />
     </DndProvider>
   );
 }
