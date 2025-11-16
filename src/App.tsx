@@ -338,7 +338,8 @@ const AppContent: React.FC = () => {
   const [currentSequence, setCurrentSequence] = useState<AnimationSequence | null>(null);
   const [sequenceName, setSequenceName] = useState('');
   const [sequenceBuilderPoses, setSequenceBuilderPoses] = useState<SequenceBuilderItem[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const poseFileInputRef = useRef<HTMLInputElement>(null);
+  const sequenceFileInputRef = useRef<HTMLInputElement>(null);
   const animationRef = useRef<number | null>(null);
 
   const saveToLocalStorage = useCallback((key: string, data: any) => {
@@ -637,7 +638,10 @@ const AppContent: React.FC = () => {
 
   const [{ isOver, canDrop }, dropRef] = useDrop(() => ({
     accept: ItemTypes.POSE,
-    drop: (item: { id: string, index: number }) => {
+    drop: (item: { id: string, index: number, source: string }) => {
+      if (item.source === 'builder') {
+        return;
+      }
       const droppedPose = recordedPoses.find(p => p.id === item.id);
       if (droppedPose) {
         const newInstance: SequenceBuilderItem = {
@@ -853,10 +857,10 @@ const AppContent: React.FC = () => {
           <div style={{ marginTop: '10px' }}>
             <button onClick={exportPoses} disabled={!recordedPoses.length}>포즈 내보내기</button>
             <label style={{ marginLeft: '10px', display: 'inline-block' }}>
-              <button onClick={() => fileInputRef.current?.click()}>포즈 가져오기</button>
+              <button onClick={() => poseFileInputRef.current?.click()}>포즈 가져오기</button>
               <input
                 type="file"
-                ref={fileInputRef}
+                ref={poseFileInputRef}
                 onChange={importPoses}
                 accept=".json"
                 style={{ display: 'none' }}
@@ -1037,6 +1041,19 @@ const AppContent: React.FC = () => {
             >
               시퀀스 생성
             </button>
+          </div>
+          <div style={{ marginTop: '10px', marginBottom: '12px' }}>
+            <button onClick={exportSequences} disabled={!sequences.length}>시퀀스 내보내기</button>
+            <label style={{ marginLeft: '10px', display: 'inline-block' }}>
+              <button onClick={() => sequenceFileInputRef.current?.click()}>시퀀스 가져오기</button>
+              <input
+                type="file"
+                ref={sequenceFileInputRef}
+                onChange={importSequences}
+                accept=".json"
+                style={{ display: 'none' }}
+              />
+            </label>
           </div>
 
           {sequences.length > 0 && (
