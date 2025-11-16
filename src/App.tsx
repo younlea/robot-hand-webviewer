@@ -4,6 +4,7 @@ import { HTML5Backend } from 'react-dnd-html5-backend';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import URDFLoader from 'urdf-loader';
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 
 type JointPose = {
   [key: string]: number;
@@ -246,6 +247,7 @@ const AppContent: React.FC = () => {
   const [scene] = useState(() => new THREE.Scene());
   const [camera] = useState(() => new THREE.PerspectiveCamera(45, 1, 0.01, 1000));
   const [controls, setControls] = useState<OrbitControls | null>(null);
+  const [currentModel, setCurrentModel] = useState<THREE.Object3D | null>(null);
 
   useEffect(() => {
     if (!mountRef.current) return
@@ -355,12 +357,17 @@ const AppContent: React.FC = () => {
     loader.load('/default.urdf', (result: any) => {
       const urdf = result;
       urdf.rotation.x = -Math.PI / 2;
+      
+      if (currentModel) {
+        scene.remove(currentModel);
+      }
+
       scene.add(urdf);
+      setCurrentModel(urdf);
       setRobot(urdf);
       const jointList = Object.keys(urdf.joints)
         .map(jointName => {
           const joint = urdf.joints[jointName];
-          // Initialize the joint value to its lower limit, which is the default state.
           const initialValue = joint.limit.lower;
           urdf.setJointValue(jointName, initialValue);
           return {
@@ -372,13 +379,13 @@ const AppContent: React.FC = () => {
         });
       setJoints(jointList);
     });
-  }, [scene]);
+  }, [scene, currentModel]);
 
   useEffect(() => {
-    if (scene && !robot) {
+    if (scene && !currentModel) {
       loadDefaultURDF();
     }
-  }, [scene, robot, loadDefaultURDF]);
+  }, [scene, currentModel, loadDefaultURDF]);
 
   const addPose = useCallback(() => {
     if (!robot) return;
@@ -475,6 +482,39 @@ const AppContent: React.FC = () => {
     saveToLocalStorage(STORAGE_KEYS.SEQUENCES, seqs);
   }, [saveToLocalStorage]);
 
+  const onLoadStlFile = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !scene) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const contents = e.target?.result as ArrayBuffer;
+        const loader = new STLLoader();
+        const geometry = loader.parse(contents);
+        
+        const material = new THREE.MeshStandardMaterial({ color: 0x999999 });
+        const mesh = new THREE.Mesh(geometry, material);
+
+        if (currentModel) {
+            scene.remove(currentModel);
+        }
+        setRobot(null);
+        setJoints([]);
+
+        scene.add(mesh);
+        setCurrentModel(mesh);
+
+        const box = new THREE.Box3().setFromObject(mesh);
+        const center = box.getCenter(new THREE.Vector3());
+        controls?.target.copy(center);
+        controls?.update();
+    };
+    reader.readAsArrayBuffer(file);
+    if (event.target) {
+        event.target.value = '';
+    }
+  }, [scene, currentModel, controls]);
+
   const onLoadUrdfFile = useCallback((event: ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0];
       if (!file || !scene) return;
@@ -486,11 +526,12 @@ const AppContent: React.FC = () => {
         const newRobot = loader.parse(urdfContent);
         newRobot.rotation.x = -Math.PI / 2;
         
-        if (robot) {
-          scene.remove(robot);
+        if (currentModel) {
+          scene.remove(currentModel);
         }
 
         scene.add(newRobot);
+        setCurrentModel(newRobot);
         setRobot(newRobot);
         const jointList = Object.keys(newRobot.joints).map(jointName => {
           const joint = newRobot.joints[jointName];
@@ -507,7 +548,7 @@ const AppContent: React.FC = () => {
       if (event.target) {
         event.target.value = '';
       }
-    }, [scene, robot]);
+    }, [scene, currentModel]);
 
   const exportToFile = (data: any, filename: string) => {
     const json = JSON.stringify(data, null, 2);
@@ -734,8 +775,17 @@ const AppContent: React.FC = () => {
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 400px', height: '100vh' }}>
       <div ref={mountRef} style={{ width: '100%', height: '100%' }} />
       <div style={{ padding: 12, overflow: 'auto', borderLeft: '1px solid #e5e7eb' }}>
-        <h3 style={{ marginTop: 0 }}>URDF 뷰어</h3>
-        <input type="file" accept=".urdf, text/xml, application/xml" onChange={onLoadUrdfFile} />
+        <h3 style={{ marginTop: 0 }}>모델 로드</h3>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ flexBasis: '50px' }}>URDF:</span>
+            <input type="file" accept=".urdf, text/xml, application/xml" onChange={onLoadUrdfFile} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ flexBasis: '50px' }}>STL:</span>
+            <input type="file" accept=".stl" onChange={onLoadStlFile} />
+          </div>
+        </div>
         
         <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
           <h4 style={{ marginTop: 0, marginBottom: '12px' }}>레코딩 컨트롤</h4>
@@ -756,16 +806,16 @@ const AppContent: React.FC = () => {
             </button>
             <button 
               onClick={addPose}
-              disabled={!isRecording}
+              disabled={!isRecording || !robot}
               style={{
                 flex: 1,
                 padding: '8px',
-                backgroundColor: isRecording ? '#3b82f6' : '#d1d5db',
-                color: isRecording ? 'white' : '#6b7280',
+                backgroundColor: (isRecording && robot) ? '#3b82f6' : '#d1d5db',
+                color: (isRecording && robot) ? 'white' : '#6b7280',
                 border: 'none',
                 borderRadius: '4px',
-                cursor: isRecording ? 'pointer' : 'not-allowed',
-                opacity: isRecording ? 1 : 0.7
+                cursor: (isRecording && robot) ? 'pointer' : 'not-allowed',
+                opacity: (isRecording && robot) ? 1 : 0.7
               }}
             >
               포즈 추가
@@ -783,7 +833,7 @@ const AppContent: React.FC = () => {
               border: '1px solid #d1d5db',
               borderRadius: '4px'
             }}
-            disabled={!isRecording}
+            disabled={!isRecording || !robot}
           />
           <div style={{ display: 'flex', gap: '8px' }}>
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1103,7 +1153,9 @@ const AppContent: React.FC = () => {
         <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
           <h4 style={{ marginTop: 0, marginBottom: '12px' }}>조인트 제어</h4>
           {joints.length === 0 ? (
-            <div style={{ color: '#666' }}>로드된 조인트가 없습니다. URDF 파일을 로드해주세요.</div>
+            <div style={{ color: '#666' }}>
+              {robot ? '현재 모델은 조인트 정보가 없습니다.' : '로드된 조인트가 없습니다. URDF 파일을 로드해주세요.'}
+            </div>
           ) : (
             <div>
               {joints.map(j => (
