@@ -48,6 +48,19 @@ For detailed installation and development instructions, see [INSTALLATION.md](IN
 - Visualize joint hierarchies and limits
 - Real-time joint angle updates
 
+### 🤖 Model Modifications
+
+The default `default.urdf` hand model has been significantly improved for more realistic, human-like motion:
+
+*   **Thumb:**
+    *   **4-DOF Movement:** The thumb now has 4 degrees of freedom, including a base rotation (abduction) and proper inward flexion.
+    *   **Corrected Orientation:** The thumb's links are now oriented to extend from the side of the palm, not from the top like the other fingers.
+    *   **Natural Placement:** The base of the thumb has been lowered to the vertical midpoint of the palm.
+
+*   **Fingers (Index, Middle, Ring, Pinky):**
+    *   **Corrected Bending Direction:** All four fingers now bend inwards towards the thumb, allowing the hand to close into a natural fist.
+    *   **Realistic Joint Limits:** The joint limits have been adjusted to allow for >90 degrees of inward flexion while preventing unnatural outward movement.
+
 ## 🏗️ Project Structure
 
 ```
@@ -197,6 +210,21 @@ hand_webviewer/
 - 3D 엔진: Three.js
 - URDF 파서/로더: urdf-loader (joints 추출 및 setJointValue 지원)
 - 빌드/실행: Docker + Docker Compose
+
+---
+
+### 🤖 모델 수정 내역
+
+기본 `default.urdf` 핸드 모델이 더 사실적이고 사람 손과 유사한 움직임을 갖도록 크게 개선되었습니다.
+
+*   **엄지손가락:**
+    *   **4자유도 움직임:** 이제 엄지손가락은 4자유도를 가집니다. 옆으로 벌리는 움직임(abduction)과 자연스러운 안쪽 굽힘이 모두 가능합니다.
+    *   **올바른 초기 방향:** 엄지손가락의 링크(마디)들이 다른 손가락처럼 손등 위가 아닌, 손바닥 옆에서 뻗어 나오도록 초기 방향이 수정되었습니다.
+    *   **자연스러운 위치:** 엄지손가락의 시작 위치가 손바닥의 수직 중간 지점으로 이동하여 더 자연스러워졌습니다.
+
+*   **나머지 손가락 (검지, 중지, 약지, 새끼):**
+    *   **굽힘 방향 수정:** 네 손가락 모두 엄지손가락 방향, 즉 안쪽으로 굽혀지도록 수정되어 자연스럽게 주먹을 쥘 수 있습니다.
+    *   **사실적인 관절 한계:** 관절의 가동 범위가 수정되어, 바깥쪽으로는 비정상적으로 꺾이지 않고 안쪽으로만 90도 이상 굽혀질 수 있습니다.
 
 ---
 
