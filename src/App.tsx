@@ -5,6 +5,11 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import URDFLoader from 'urdf-loader';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import {
+  HandLandmarker,
+  FilesetResolver,
+  DrawingUtils
+} from '@mediapipe/tasks-vision';
 
 type JointPose = {
   [key: string]: number;
@@ -12,7 +17,7 @@ type JointPose = {
 
 type RecordedPose = {
   id: string;
-  name: string;
+  name:string;
   timestamp: number;
   joints: JointPose;
 };
@@ -241,7 +246,476 @@ const PoseItem: React.FC<PoseItemProps> = ({ pose, index, source, movePose, onDe
   );
 };
 
-const AppContent: React.FC = () => {
+const CaptureModeView: React.FC<{ onExit: () => void }> = ({ onExit }) => {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const recordedJointsRef = useRef<{ timestamp: number; joints: JointPose }[]>([]);
+  const [renderer] = useState(() => new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true }));
+  const [scene] = useState(() => new THREE.Scene());
+  const [camera] = useState(() => new THREE.PerspectiveCamera(45, 1, 0.01, 1000));
+  const [controls, setControls] = useState<OrbitControls | null>(null);
+  const [currentModel, setCurrentModel] = useState<THREE.Object3D | null>(null);
+  const [robot, setRobot] = useState<any | null>(null);
+  const [joints, setJoints] = useState<{ name: string; min: number; max: number; value: number }[]>([]);
+  const handLandmarker = useRef<HandLandmarker | null>(null);
+  const animationFrameId = useRef<number | null>(null);
+  const [isRecordingJoints, setIsRecordingJoints] = useState(false);
+  const isRecordingRef = useRef(isRecordingJoints);
+  isRecordingRef.current = isRecordingJoints;
+
+  const applyPose = useCallback((pose: JointPose) => {
+    if (!robot) return;
+
+    const poseMap = new Map(Object.entries(pose));
+
+    // Update robot model (side effect)
+    for (const [jointName, value] of poseMap.entries()) {
+      if (robot.joints[jointName]) {
+        (robot as any).setJointValue(jointName, value);
+      }
+    }
+
+    // Update React state
+    setJoints(prevJoints =>
+      prevJoints.map(joint => {
+        if (poseMap.has(joint.name)) {
+          return { ...joint, value: poseMap.get(joint.name)! };
+        }
+        return joint;
+      })
+    );
+  }, [robot]);
+
+  // 1. 3D 뷰어 초기화
+  useEffect(() => {
+    if (!mountRef.current) return;
+
+    const mount = mountRef.current;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(mount.clientWidth, mount.clientHeight);
+    mount.appendChild(renderer.domElement);
+
+    camera.position.set(0.6, 0.4, 0.9);
+    camera.lookAt(0, 0, 0);
+
+    const orbitControls = new OrbitControls(camera, renderer.domElement);
+    orbitControls.enableDamping = true;
+    orbitControls.target.set(0, 0.1, 0);
+    orbitControls.update();
+    setControls(orbitControls);
+
+    const resize = () => {
+      if (!mount) return;
+      const w = mount.clientWidth;
+      const h = mount.clientHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    };
+    const ro = new ResizeObserver(resize);
+    ro.observe(mount);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+    dir.position.set(2, 3, 2);
+    scene.add(dir);
+    scene.add(new THREE.GridHelper(2, 20));
+
+    const tick = () => {
+      animationFrameId.current = requestAnimationFrame(tick);
+      orbitControls.update();
+      renderer.render(scene, camera);
+    };
+    tick();
+
+    return () => {
+      if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
+      ro.disconnect();
+      orbitControls.dispose();
+      if (mount.contains(renderer.domElement)) {
+        mount.removeChild(renderer.domElement);
+      }
+      scene.clear();
+    };
+  }, [renderer, scene, camera]);
+
+  // 2. URDF 모델 로드
+  const loadDefaultURDF = useCallback(() => {
+    if (!scene) return;
+    const loader = new URDFLoader();
+    loader.load('/default.urdf', (result: any) => {
+      const urdf = result;
+      urdf.rotation.x = -Math.PI / 2;
+      
+      if (currentModel) scene.remove(currentModel);
+
+      scene.add(urdf);
+      setCurrentModel(urdf);
+      setRobot(urdf);
+      const jointList = Object.keys(urdf.joints).map(jointName => {
+        const joint = urdf.joints[jointName];
+        const initialValue = joint.limit.lower;
+        urdf.setJointValue(jointName, initialValue);
+        return {
+          name: jointName,
+          min: joint.limit.lower,
+          max: joint.limit.upper,
+          value: initialValue,
+        };
+      });
+      setJoints(jointList);
+    });
+  }, [scene, currentModel]);
+
+  useEffect(() => {
+    if (scene && !currentModel) {
+      loadDefaultURDF();
+    }
+  }, [scene, currentModel, loadDefaultURDF]);
+
+  const calculateJointAngles = (landmarks: any[]): JointPose => {
+    const jointPose: JointPose = {};
+  
+    const getAngle = (p1: any, p2: any, p3: any) => {
+      const v1 = { x: p1.x - p2.x, y: p1.y - p2.y, z: p1.z - p2.z };
+      const v2 = { x: p3.x - p2.x, y: p3.y - p2.y, z: p3.z - p2.z };
+      const dot = v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+      const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y + v1.z * v1.z);
+      const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y + v2.z * v2.z);
+      const angle = Math.acos(dot / (mag1 * mag2));
+      return angle;
+    };
+  
+    if (landmarks && landmarks.length > 0) {
+      const l = landmarks[0];
+  
+      // Index finger
+      jointPose['index_base_joint'] = Math.max(0, Math.PI - getAngle(l[0], l[5], l[6]));
+      jointPose['index_mid_joint'] = Math.max(0, Math.PI - getAngle(l[5], l[6], l[7]));
+      jointPose['index_tip_joint'] = Math.max(0, Math.PI - getAngle(l[6], l[7], l[8]));
+  
+      // Middle finger
+      jointPose['middle_base_joint'] = Math.max(0, Math.PI - getAngle(l[0], l[9], l[10]));
+      jointPose['middle_mid_joint'] = Math.max(0, Math.PI - getAngle(l[9], l[10], l[11]));
+      jointPose['middle_tip_joint'] = Math.max(0, Math.PI - getAngle(l[10], l[11], l[12]));
+  
+      // Ring finger
+      jointPose['ring_base_joint'] = Math.max(0, Math.PI - getAngle(l[0], l[13], l[14]));
+      jointPose['ring_mid_joint'] = Math.max(0, Math.PI - getAngle(l[13], l[14], l[15]));
+      jointPose['ring_tip_joint'] = Math.max(0, Math.PI - getAngle(l[14], l[15], l[16]));
+  
+      // Pinky finger
+      jointPose['pinky_base_joint'] = Math.max(0, Math.PI - getAngle(l[0], l[17], l[18]));
+      jointPose['pinky_mid_joint'] = Math.max(0, Math.PI - getAngle(l[17], l[18], l[19]));
+      jointPose['pinky_tip_joint'] = Math.max(0, Math.PI - getAngle(l[18], l[19], l[20]));
+  
+      // Thumb
+      jointPose['thumb_abduction_joint'] = Math.max(0, getAngle(l[2], l[1], l[0]) - 0.8);
+      jointPose['thumb_base_joint'] = Math.max(0, Math.PI - getAngle(l[1], l[2], l[3]));
+      jointPose['thumb_mid_joint'] = Math.max(0, Math.PI - getAngle(l[2], l[3], l[4]));
+      jointPose['thumb_tip_joint'] = Math.max(0, Math.PI - getAngle(l[3], l[4], l[4])); // Placeholder
+    }
+  
+    return jointPose;
+  };
+
+  // 3. MediaPipe HandLandmarker 초기화 및 웹캠 시작
+  useEffect(() => {
+    let localHandLandmarker: HandLandmarker | null = null;
+    let animationFrameId: number | null = null;
+
+    const createHandLandmarker = async () => {
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        );
+        localHandLandmarker = await HandLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+            delegate: "GPU"
+          },
+          runningMode: "VIDEO",
+          numHands: 1
+        });
+        handLandmarker.current = localHandLandmarker;
+        console.log("HandLandmarker created");
+        startWebcam();
+      } catch (e) {
+        console.error("Failed to create HandLandmarker", e);
+      }
+    };
+
+    const startWebcam = () => {
+      if (!handLandmarker.current) {
+        console.log("HandLandmarker not ready yet");
+        return;
+      }
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        const message = "카메라에 접근할 수 없습니다. 이 기능은 보안 연결(HTTPS) 또는 localhost에서만 작동합니다.";
+        console.error(message);
+        alert(message);
+        return;
+      }
+
+      navigator.mediaDevices.getUserMedia({ video: true })
+        .then((stream) => {
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            videoRef.current.addEventListener('loadeddata', () => {
+              if (videoRef.current && canvasRef.current) {
+                canvasRef.current.width = videoRef.current.videoWidth;
+                canvasRef.current.height = videoRef.current.videoHeight;
+              }
+              predictWebcam();
+            });
+          }
+        })
+        .catch((err) => {
+          console.error("Error accessing webcam: ", err);
+        });
+    };
+
+    const predictWebcam = () => {
+      if (!videoRef.current || !canvasRef.current || !handLandmarker.current) {
+        animationFrameId = requestAnimationFrame(predictWebcam);
+        return;
+      }
+
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const canvasCtx = canvas.getContext("2d");
+
+      if (video.readyState < 2) {
+        animationFrameId = requestAnimationFrame(predictWebcam);
+        return;
+      }
+
+      if (!canvasCtx) {
+        return;
+      }
+
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const results = handLandmarker.current.detectForVideo(video, performance.now());
+
+      const drawingUtils = new DrawingUtils(canvasCtx);
+
+      if (results.landmarks) {
+        for (const landmarks of results.landmarks) {
+          drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, { color: "#00FF00", lineWidth: 5 });
+          drawingUtils.drawLandmarks(landmarks, { color: "#FF0000", lineWidth: 2 });
+        }
+        const jointPose = calculateJointAngles(results.landmarks);
+        applyPose(jointPose);
+        if (isRecordingRef.current) {
+          try {
+            recordedJointsRef.current.push({ timestamp: Date.now(), joints: jointPose });
+          } catch (e) {
+            console.error("Error while recording joint data:", e);
+          }
+        }
+      }
+      canvasCtx.restore();
+
+      animationFrameId = requestAnimationFrame(predictWebcam);
+    };
+
+    createHandLandmarker();
+
+    return () => {
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+      }
+      if (videoRef.current && videoRef.current.srcObject) {
+        (videoRef.current.srcObject as MediaStream).getTracks().forEach(track => track.stop());
+      }
+      if(localHandLandmarker) {
+        localHandLandmarker.close();
+      }
+    }
+  }, [applyPose]);
+
+  const takeSnapshot = () => {
+    if (!renderer || !videoRef.current || !canvasRef.current) return;
+  
+    const threeCanvas = renderer.domElement;
+    const video = videoRef.current;
+    const landmarksCanvas = canvasRef.current;
+  
+    const compositeCanvas = document.createElement('canvas');
+    const ctx = compositeCanvas.getContext('2d');
+    if (!ctx) return;
+  
+    const targetWidth = 1280;
+    const targetHeight = 720;
+    compositeCanvas.width = targetWidth * 2;
+    compositeCanvas.height = targetHeight;
+  
+    // Draw 3D view
+    ctx.drawImage(threeCanvas, 0, 0, targetWidth, targetHeight);
+  
+    // Draw webcam view (flipped)
+    ctx.save();
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, -targetWidth * 2, 0, targetWidth, targetHeight);
+    ctx.restore();
+  
+    // Draw landmarks (flipped)
+    ctx.save();
+    ctx.translate(targetWidth, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(landmarksCanvas, 0, 0, targetWidth, targetHeight);
+    ctx.restore();
+  
+    const a = document.createElement('a');
+    a.href = compositeCanvas.toDataURL('image/png');
+    a.download = `snapshot-${new Date().toISOString()}.png`;
+    a.click();
+  };
+
+  const saveCurrentPose = () => {
+    const currentJointsState: JointPose = {};
+    joints.forEach(j => {
+      currentJointsState[j.name] = j.value;
+    });
+
+    const poseName = prompt("저장할 포즈의 이름을 입력하세요:", `캡쳐 ${new Date().toLocaleTimeString()}`);
+    if (!poseName) return;
+
+    const newPose: RecordedPose = {
+      id: `pose-${Date.now()}`,
+      name: poseName,
+      timestamp: Date.now(),
+      joints: currentJointsState,
+    };
+
+    try {
+      if (typeof window !== 'undefined') {
+        const saved = localStorage.getItem(STORAGE_KEYS.POSES);
+        const existingPoses = saved ? JSON.parse(saved) : [];
+        const newPoses = [...existingPoses, newPose];
+        localStorage.setItem(STORAGE_KEYS.POSES, JSON.stringify(newPoses));
+        alert(`포즈 '${poseName}'이(가) 저장되었습니다. 돌아가기 버튼을 누르면 목록에서 확인할 수 있습니다.`);
+      }
+    } catch (error) {
+      console.error('Error saving to local storage:', error);
+      alert('포즈 저장에 실패했습니다.');
+    }
+  };
+
+  const toggleJointRecording = () => {
+    if (isRecordingJoints) {
+      // Stop recording
+      setIsRecordingJoints(false);
+      const recording = recordedJointsRef.current;
+      recordedJointsRef.current = [];
+
+      if (recording.length < 2) {
+        alert("녹화 시간이 너무 짧습니다.");
+        return;
+      }
+
+      const sequenceName = prompt("저장할 시퀀스의 이름을 입력하세요:", `녹화 ${new Date().toLocaleTimeString()}`);
+      if (!sequenceName) return;
+
+      try {
+        // 1. Get existing poses and sequences from localStorage
+        const savedPosesStr = localStorage.getItem(STORAGE_KEYS.POSES) || '[]';
+        const savedSequencesStr = localStorage.getItem(STORAGE_KEYS.SEQUENCES) || '[]';
+        let existingPoses: RecordedPose[] = JSON.parse(savedPosesStr);
+        let existingSequences: AnimationSequence[] = JSON.parse(savedSequencesStr);
+
+        // 2. Sample the recording to create new poses
+        const newPoses: RecordedPose[] = [];
+        const newSequencePoses: SequencePose[] = [];
+        const sampleInterval = 1000; // 1 pose per second
+        let lastSampleTime = -Infinity;
+
+        for (const frame of recording) {
+          if (frame.timestamp - lastSampleTime >= sampleInterval) {
+            const newPoseId = `pose-${frame.timestamp}-${Math.random().toString(16).slice(2)}`;
+            const newPose: RecordedPose = {
+              id: newPoseId,
+              name: `${sequenceName} #${newPoses.length + 1}`,
+              timestamp: frame.timestamp,
+              joints: frame.joints,
+            };
+            newPoses.push(newPose);
+            newSequencePoses.push({ poseId: newPoseId, duration: sampleInterval });
+            lastSampleTime = frame.timestamp;
+          }
+        }
+        
+        if (newSequencePoses.length > 1) {
+            const lastPoseTime = newPoses[newPoses.length - 1].timestamp;
+            const remainingTime = recording[recording.length - 1].timestamp - lastPoseTime;
+            if (remainingTime > 100) {
+                 newSequencePoses[newSequencePoses.length - 2].duration = lastPoseTime - newPoses[newPoses.length - 2].timestamp;
+                 newSequencePoses[newSequencePoses.length - 1].duration = remainingTime;
+            }
+        }
+
+        if (newPoses.length < 2) {
+            alert("의미있는 포즈를 생성하기에 녹화 시간이 너무 짧습니다.");
+            return;
+        }
+
+        // 3. Create the new sequence
+        const newSequence: AnimationSequence = {
+          id: `seq-${Date.now()}`,
+          name: sequenceName,
+          poses: newSequencePoses,
+        };
+
+        // 4. Save back to localStorage
+        const updatedPoses = [...existingPoses, ...newPoses];
+        const updatedSequences = [...existingSequences, newSequence];
+        localStorage.setItem(STORAGE_KEYS.POSES, JSON.stringify(updatedPoses));
+        localStorage.setItem(STORAGE_KEYS.SEQUENCES, JSON.stringify(updatedSequences));
+
+        alert(`시퀀스 '${sequenceName}'이(가) 저장되었습니다. 돌아가기 버튼을 누르면 목록에서 확인할 수 있습니다.`);
+
+      } catch (error) {
+        console.error('Error saving sequence:', error);
+        alert('시퀀스 저장에 실패했습니다.');
+      }
+
+    } else {
+      // Start recording
+      recordedJointsRef.current = [];
+      setIsRecordingJoints(true);
+    }
+  };
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', height: '100vh' }}>
+      <div ref={mountRef} style={{ width: '100%', height: '100%', position: 'relative' }} />
+      <div style={{ padding: 12, overflow: 'auto', borderLeft: '1px solid #e5e7eb', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ flexShrink: 0, marginBottom: '12px' }}>
+          <button onClick={onExit} style={{ padding: '8px 16px', marginBottom: '12px' }}>돌아가기</button>
+          <h2>카메라 캡쳐 모드</h2>
+        </div>
+        <div style={{ position: 'relative', flexGrow: 1 }}>
+          <video ref={videoRef} autoPlay playsInline style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)', zIndex: 1 }} />
+          <canvas ref={canvasRef} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', transform: 'scaleX(-1)', zIndex: 2 }} />
+        </div>
+        <div style={{ flexShrink: 0, padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px', marginTop: '12px' }}>
+          <h4 style={{ marginTop: 0 }}>컨트롤</h4>
+          <button onClick={takeSnapshot}>이미지 스냅샷</button>
+          <button onClick={saveCurrentPose} style={{ marginLeft: '8px' }}>관절각도 저장</button>
+          <button onClick={toggleJointRecording} style={{ marginLeft: '8px' }}>
+            {isRecordingJoints ? '녹화 중지' : '관절 각도 녹화'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const AppContent: React.FC<{ onEnterCaptureMode: () => void }> = ({ onEnterCaptureMode }) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const [renderer] = useState(() => new THREE.WebGLRenderer({ antialias: true }));
   const [scene] = useState(() => new THREE.Scene());
@@ -588,8 +1062,28 @@ const AppContent: React.FC = () => {
   }, [recordedPoses]);
 
   const exportSequences = useCallback(() => {
-    exportToFile(sequences, `robot-hand-sequences-${new Date().toISOString().split('T')[0]}.json`);
-  }, [sequences]);
+    if (sequences.length === 0) {
+      alert("내보낼 시퀀스가 없습니다.");
+      return;
+    }
+    // Find all unique pose IDs used in the sequences
+    const allPoseIds = new Set<string>();
+    sequences.forEach(seq => {
+      seq.poses.forEach(p => allPoseIds.add(p.poseId));
+    });
+
+    // Get the actual pose data for those IDs
+    const requiredPoses = recordedPoses.filter(p => allPoseIds.has(p.id));
+
+    const exportData = {
+      type: 'robot-hand-sequence-bundle',
+      version: 1,
+      sequences: sequences,
+      poses: requiredPoses,
+    };
+
+    exportToFile(exportData, `sequences-bundle-${new Date().toISOString().split('T')[0]}.json`);
+  }, [sequences, recordedPoses]);
 
   const importPoses = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     importFromFile(event, (data) => {
@@ -605,15 +1099,65 @@ const AppContent: React.FC = () => {
 
   const importSequences = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     importFromFile(event, (data) => {
-      if (Array.isArray(data) && data.every(seq => seq.id && seq.name && Array.isArray(seq.poses))) {
-        setSequences(data);
-        saveSequences(data);
-        alert(`${data.length}개의 시퀀스를 성공적으로 가져왔습니다.`);
+      // New bundled format check
+      if (data && data.type === 'robot-hand-sequence-bundle' && data.version === 1 && Array.isArray(data.sequences) && Array.isArray(data.poses)) {
+        const importedSequences: AnimationSequence[] = data.sequences;
+        const importedPoses: RecordedPose[] = data.poses;
+
+        // Merge poses: Add new, don't overwrite existing by ID
+        const existingPosesMap = new Map(recordedPoses.map(p => [p.id, p]));
+        const newPosesToAdd = importedPoses.filter(p => !existingPosesMap.has(p.id));
+        
+        // Merge sequences: Add new, don't overwrite existing by ID
+        const existingSequencesMap = new Map(sequences.map(s => [s.id, s]));
+        const newSequencesToAdd = importedSequences.filter(s => !existingSequencesMap.has(s.id));
+
+        if (newPosesToAdd.length === 0 && newSequencesToAdd.length === 0) {
+          alert("이미 모든 시퀀스와 포즈가 존재합니다.");
+          return;
+        }
+
+        const updatedPoses = [...recordedPoses, ...newPosesToAdd];
+        savePoses(updatedPoses);
+
+        const updatedSequences = [...sequences, ...newSequencesToAdd];
+        saveSequences(updatedSequences);
+        
+        alert(`${newSequencesToAdd.length}개의 신규 시퀀스와 ${newPosesToAdd.length}개의 신규 포즈를 성공적으로 가져왔습니다.`);
+        return; // Exit after successful import
+      }
+      
+      // Lenient legacy format check (array of sequences or single sequence object)
+      let sequencesToImport: AnimationSequence[] = [];
+      if (Array.isArray(data)) {
+        sequencesToImport = data.filter(
+          seq => seq && typeof seq === 'object' && seq.id && seq.name && Array.isArray(seq.poses)
+        );
+      } else if (data && typeof data === 'object' && !Array.isArray(data) && data.id && data.name && Array.isArray(data.poses)) {
+        // Handle case where a single sequence object was exported
+        sequencesToImport.push(data as AnimationSequence);
+      }
+
+      if (sequencesToImport.length > 0) {
+        alert('레거시 시퀀스 파일 형식입니다. 이 시퀀스와 연관된 포즈가 목록에 없으면 제대로 작동하지 않을 수 있습니다.');
+        
+        const existingSequencesMap = new Map(sequences.map(s => [s.id, s]));
+        const newSequencesToAdd = sequencesToImport.filter(s => !existingSequencesMap.has(s.id));
+
+        if (newSequencesToAdd.length === 0) {
+          alert("가져온 파일의 모든 시퀀스가 이미 존재합니다.");
+          return;
+        }
+
+        const updatedSequences = [...sequences, ...newSequencesToAdd];
+        saveSequences(updatedSequences);
+        
+        alert(`${newSequencesToAdd.length}개의 신규 시퀀스를 성공적으로 가져왔습니다.`);
       } else {
-        alert('잘못된 시퀀스 데이터 형식입니다.');
+        alert('지원되지 않거나 잘못된 시퀀스 파일 형식입니다.');
       }
     });
-  }, [importFromFile, saveSequences]);
+  }, [importFromFile, saveSequences, savePoses, recordedPoses, sequences]);
 
   const deg = (rad: number) => (rad * 180) / Math.PI;
 
@@ -779,6 +1323,24 @@ const AppContent: React.FC = () => {
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 400px', height: '100vh' }}>
       <div ref={mountRef} style={{ width: '100%', height: '100%' }} />
       <div style={{ padding: 12, overflow: 'auto', borderLeft: '1px solid #e5e7eb' }}>
+        <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
+            <button 
+              onClick={onEnterCaptureMode}
+              style={{
+                width: '100%',
+                padding: '10px',
+                backgroundColor: '#1d4ed8',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontSize: '16px',
+                fontWeight: 'bold'
+              }}
+            >
+              카메라 모델 캡쳐
+            </button>
+        </div>
         <h3 style={{ marginTop: 0 }}>모델 로드</h3>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '16px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1200,9 +1762,15 @@ const AppContent: React.FC = () => {
 };
 
 const App: React.FC = () => {
+  const [isCaptureMode, setIsCaptureMode] = useState(false);
+
+  if (isCaptureMode) {
+    return <CaptureModeView onExit={() => setIsCaptureMode(false)} />;
+  }
+
   return (
     <DndProvider backend={HTML5Backend}>
-      <AppContent />
+      <AppContent onEnterCaptureMode={() => setIsCaptureMode(true)} />
     </DndProvider>
   );
 }

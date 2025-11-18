@@ -9,6 +9,7 @@ A web-based 3D hand model (URDF) viewer with real-time joint control. Visualize 
 **Key Features**
 - 🖐️ 5-finger hand model with realistic joint constraints
 - 🎮 Interactive joint control with sliders
+- 📸 Real-time hand tracking via webcam using MediaPipe
 - 🖱️ Intuitive camera controls (rotate, zoom, pan)
 - 📤 Load custom URDF files
 - 🐳 Docker support for easy deployment
@@ -19,6 +20,7 @@ A web-based 3D hand model (URDF) viewer with real-time joint control. Visualize 
 ### Prerequisites
 - [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
 - Modern web browser (Chrome, Firefox, Edge)
+- A webcam for the hand tracking feature
 
 ### Running with Docker
 ```bash
@@ -31,6 +33,15 @@ Then open `http://localhost:5173` in your browser.
 For detailed installation and development instructions, see [INSTALLATION.md](INSTALLATION.md).
 
 ## 🛠️ Features
+
+### New Feature: Camera Hand Tracking
+- **Real-time Control**: Control the 3D robot hand in real-time using your own hand movements via a webcam.
+- **MediaPipe Integration**: Utilizes Google's MediaPipe Hand Landmarker to detect hand landmarks and calculate joint angles.
+- **Easy Activation**: Simply click the "Camera Capture Mode" button to start the webcam and enable tracking.
+- **Recording**: Record a sequence of joint angles captured from your hand movements and save it as a JSON file.
+- **Playback**: Load a recorded sequence to play it back on the 3D model.
+
+**Note**: You will need to grant camera permissions in your browser to use this feature.
 
 ### Hand Model
 - 5-finger URDF model with realistic joint constraints
@@ -89,6 +100,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - [Three.js](https://threejs.org/) - 3D library
 - [urdf-loader](https://github.com/gkjohnson/urdf-loaders) - URDF loader for Three.js
+- [MediaPipe](https://developers.google.com/mediapipe) - Hand tracking ML models
 - [Vite](https://vitejs.dev/) - Frontend tooling
 
 ---
@@ -174,6 +186,7 @@ Docker 없이 실행하고 싶다면 다음을 사용하세요.
 
 사전 요구 사항:
 - Node.js 20.x 권장
+- 웹캠
 
 설치 및 실행:
 ```bash
@@ -182,6 +195,8 @@ npm run dev
 ```
 - 접속: http://localhost:5173
 
+> **참고:** 이 프로젝트는 `@mediapipe/tasks-vision` 패키지를 사용하여 카메라 핸드 트래킹 기능을 제공합니다. `npm install` 실행 시 이 패키지가 함께 설치됩니다.
+>
 > 주의: 의존성(three/urdf-loader) 호환성으로 인해 Node 버전 또는 패키지 잠금 상태에 따라 결과가 달라질 수 있습니다. 문제 시 Docker 사용을 권장합니다.
 
 ---
@@ -193,7 +208,7 @@ hand_webviewer/
 │  ├─ hand_4dof.urdf     # 기본 5지/4DOF 핸드 모델
 │  └─ default.urdf       # (레거시) 간단 모델
 ├─ src/
-│  ├─ App.tsx            # Three.js + URDF 로더 + 조인트 UI
+│  ├─ App.tsx            # Three.js + URDF 로더 + 조인트 UI + 핸드 트래킹
 │  └─ main.tsx           # 앱 엔트리
 ├─ index.html            # Vite HTML 템플릿
 ├─ vite.config.ts        # Vite 서버 설정 (포트 5173)
@@ -208,7 +223,8 @@ hand_webviewer/
 ## 기술 스택
 - UI 프레임워크: React 18 + Vite
 - 3D 엔진: Three.js
-- URDF 파서/로더: urdf-loader (joints 추출 및 setJointValue 지원)
+- URDF 파서/로더: urdf-loader
+- 핸드 트래킹: MediaPipe Tasks Vision
 - 빌드/실행: Docker + Docker Compose
 
 ---
@@ -239,6 +255,12 @@ hand_webviewer/
 3) 파일 업로드
    - 상단 파일 선택에서 `.urdf` 텍스트 파일 업로드 시 즉시 로드
    - STL/메시 참조가 있는 URDF는 다음 단계의 ZIP 업로드 기능 추가 후 사용 권장
+4) **카메라 핸드 트래킹**
+   - 우측 컨트롤 패널에서 **'Camera Capture Mode'** 버튼을 클릭합니다.
+   - 브라우저가 카메라 접근 권한을 요청하면 허용합니다.
+   - 웹캠 영상이 화면에 나타나고, 인식된 손의 움직임에 따라 3D 모델이 실시간으로 제어됩니다.
+   - **'관절 각도 녹화'** 버튼으로 손동작 시퀀스를 녹화하고, **'시퀀스 저장'**으로 파일로 저장할 수 있습니다.
+   - **'시퀀스 불러오기'**로 저장된 동작 파일을 다시 재생할 수 있습니다.
 
 ---
 
@@ -250,6 +272,11 @@ hand_webviewer/
     2. `urdf-loader`가 URDF 파싱 → 링크/조인트 트리(Object3D) 생성
     3. 조인트 맵(`group.joints`)을 읽어 슬라이더 생성 (limit lower/upper 반영)
     4. 슬라이더 변경 → `group.setJointValue(name, value)` 호출 → 씬 내 관절 갱신
+  - **핸드 트래킹 흐름**
+    1. 'Camera Capture Mode' 활성화 → MediaPipe HandLandmarker 초기화
+    2. 웹캠 스트림에서 프레임마다 손 랜드마크 감지
+    3. 감지된 랜드마크 좌표를 이용해 각 손가락 관절의 각도 계산
+    4. 계산된 각도를 `setJointValue`를 통해 3D 모델에 실시간 적용
   - 카메라/조작: OrbitControls (회전/줌/팬)
 
 - **Docker 컨테이너**
@@ -263,6 +290,7 @@ hand_webviewer/
 
 ### 시스템/환경 메모
 - 브라우저: WebGL/WEBGL2 지원 필수 (현대적 Firefox/Chrome 권장)
+- **카메라**: 핸드 트래킹 기능을 사용하려면 웹캠이 필요합니다.
 - 포트: 5173 (필요 시 docker-compose에서 변경 가능)
 - 권한: docker 그룹 권한 필요
 - 성능 팁: 외장 GPU가 있는 환경에서 원활
@@ -270,6 +298,9 @@ hand_webviewer/
 ---
 
 ## 문제 해결 (Troubleshooting)
+- **카메라가 작동하지 않을 때**
+  - 브라우저 설정에서 사이트의 카메라 접근 권한이 차단되지 않았는지 확인하세요.
+  - `https` 환경에서만 카메라 접근이 가능한 경우가 있습니다. 로컬 개발 시 `http://localhost`는 대부분 지원됩니다.
 - 브라우저 콘솔에 "URDFLoader: Error parsing file"가 보일 때
   - URDF 문법 오류 또는 로더/Three 버전 호환 문제일 수 있습니다.
   - 기본 제공 `hand_4dof.urdf`로 정상 렌더링되는지 먼저 확인하세요.
